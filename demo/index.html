@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Unlimited OCR WebGPU Demo</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Space Grotesk', system-ui, sans-serif; background: #0a0e17; color: #e2e8f0; min-height: 100vh; }
+    .container { max-width: 960px; margin: 0 auto; padding: 2rem; }
+    h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-bottom: 2rem; }
+    .drop-zone {
+      border: 2px dashed #334155; border-radius: 12px; padding: 3rem; text-align: center;
+      cursor: pointer; transition: border-color 0.2s, background 0.2s;
+    }
+    .drop-zone:hover, .drop-zone.drag-over { border-color: #5B8DEF; background: rgba(91, 141, 239, 0.05); }
+    .drop-zone input { display: none; }
+    .drop-label { color: #94a3b8; font-size: 0.875rem; }
+    .preview { margin-top: 1.5rem; display: flex; gap: 1.5rem; flex-wrap: wrap; }
+    .preview img { max-width: 400px; max-height: 400px; border-radius: 8px; border: 1px solid #1e293b; }
+    .output {
+      flex: 1; min-width: 300px; background: #111827; border-radius: 8px; border: 1px solid #1e293b;
+      padding: 1rem; font-family: 'Courier New', monospace; font-size: 0.8rem; white-space: pre-wrap;
+      max-height: 400px; overflow-y: auto; line-height: 1.5;
+    }
+    .progress-bar { margin-top: 1rem; height: 4px; background: #1e293b; border-radius: 2px; overflow: hidden; }
+    .progress-fill { height: 100%; background: #5B8DEF; transition: width 0.3s; width: 0%; }
+    .status { margin-top: 0.75rem; padding: 0.75rem 1rem; background: #111827; border-radius: 8px; font-size: 0.8rem; color: #94a3b8; }
+    .status .metric { color: #5B8DEF; font-weight: 600; }
+    .loading { display: inline-block; width: 16px; height: 16px; border: 2px solid #5B8DEF; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 0.5rem; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; }
+    .badge-webgpu { background: rgba(91, 141, 239, 0.15); color: #5B8DEF; }
+    .badge-wasm { background: rgba(234, 179, 8, 0.15); color: #eab308; }
+    .block-header { color: #5B8DEF; }
+    .block-text { color: #e2e8f0; }
+    .block-table { color: #34d399; }
+    .block-bbox { color: #64748b; font-size: 0.7rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Unlimited OCR <span class="badge badge-webgpu" id="backend-badge">checking...</span></h1>
+    <p class="subtitle">Baidu's 3B MoE OCR model running in-browser via wllama. Flat KV cache via R-SWA. First WebGPU port.</p>
+
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept="image/*">
+      <p class="drop-label">Drop an image here or click to select. Model downloads on first use (~2.6GB).</p>
+    </div>
+
+    <div class="progress-bar" id="progressBar" style="display: none;">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+
+    <div class="preview" id="preview" style="display: none;">
+      <img id="previewImg" alt="Input">
+      <div class="output" id="output">Waiting for model...</div>
+    </div>
+
+    <div class="status" id="status" style="display: none;"></div>
+  </div>
+
+  <script type="module">
+    const OCR_API = 'http://localhost:5200';
+
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const preview = document.getElementById('preview');
+    const previewImg = document.getElementById('previewImg');
+    const output = document.getElementById('output');
+    const status = document.getElementById('status');
+    const badge = document.getElementById('backend-badge');
+    const progressBar = document.getElementById('progressBar');
+    const progressFill = document.getElementById('progressFill');
+
+    const hasWebGPU = 'gpu' in navigator;
+    badge.textContent = hasWebGPU ? 'WebGPU' : 'WASM';
+    badge.className = `badge ${hasWebGPU ? 'badge-webgpu' : 'badge-wasm'}`;
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      if (e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files[0]) processFile(e.target.files[0]);
+    });
+
+    function parseOCROutput(raw) {
+      const blocks = [];
+      const pattern = /^(\w+)\s+\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\](.*)$/;
+      for (const line of raw.split('\n')) {
+        const match = line.trim().match(pattern);
+        if (match) {
+          blocks.push({
+            type: match[1],
+            bbox: { x1: +match[2], y1: +match[3], x2: +match[4], y2: +match[5] },
+            text: match[6].trim() || match[6],
+          });
+        }
+      }
+      return blocks;
+    }
+
+    function renderBlocks(blocks, raw) {
+      if (blocks.length === 0) {
+        return raw || 'No text detected.';
+      }
+      return blocks.map(b => {
+        const cls = b.type === 'header' ? 'block-header' : b.type === 'table' ? 'block-table' : 'block-text';
+        return `<span class="${cls}">${b.type}</span> <span class="block-bbox">[${b.bbox.x1}, ${b.bbox.y1}, ${b.bbox.x2}, ${b.bbox.y2}]</span> ${escapeHtml(b.text)}`;
+      }).join('\n');
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    async function processFile(file) {
+      preview.style.display = 'flex';
+      status.style.display = 'block';
+
+      const url = URL.createObjectURL(file);
+      previewImg.src = url;
+
+      try {
+        output.innerHTML = '<span class="loading"></span> Running OCR inference via local API...';
+
+        const img = new Image();
+        img.src = url;
+        await new Promise(r => img.onload = r);
+
+        const reader = new FileReader();
+        const b64 = await new Promise(resolve => {
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(file);
+        });
+
+        status.innerHTML = 'Sending to OCR API (localhost:5200)...';
+        const start = performance.now();
+
+        const response = await fetch(OCR_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: b64 }),
+        });
+
+        if (!response.ok) throw new Error(`API returned ${response.status}`);
+        const result = await response.json();
+
+        const elapsed = performance.now() - start;
+        const rawText = result.text || '';
+        const blocks = parseOCROutput(rawText);
+
+        output.innerHTML = renderBlocks(blocks, rawText);
+        status.innerHTML = [
+          `Backend: <span class="metric">Metal (M4 Pro)</span>`,
+          `Inference: <span class="metric">${(elapsed / 1000).toFixed(1)}s</span>`,
+          `Blocks: <span class="metric">${blocks.length}</span>`,
+          `Image: <span class="metric">${img.naturalWidth}x${img.naturalHeight}</span>`,
+        ].join(' | ');
+
+      } catch (err) {
+        output.textContent = `Error: ${err.message}\n\n${err.stack || ''}`;
+        status.innerHTML = 'Inference failed. Check browser console for details.';
+        console.error(err);
+      }
+    }
+  </script>
+</body>
+</html>

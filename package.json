@@ -1,0 +1,27 @@
+{
+  "name": "unlimited-ocr-webgpu",
+  "version": "0.1.0",
+  "description": "Baidu Unlimited-OCR running in-browser via WebGPU. First WebGPU port of a flat-KV-cache OCR model.",
+  "type": "module",
+  "main": "dist/unlimited-ocr.js",
+  "types": "dist/unlimited-ocr.d.ts",
+  "scripts": {
+    "dev": "vite demo",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "keywords": ["ocr", "webgpu", "unlimited-ocr", "baidu", "browser", "onnx"],
+  "license": "MIT",
+  "author": "Mostagir Bhuiyan",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mmostagirbhuiyan/unlimited-ocr-webgpu"
+  },
+  "dependencies": {
+    "@wllama/wllama": "^3.5.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vite": "^7.0.0"
+  }
+}
